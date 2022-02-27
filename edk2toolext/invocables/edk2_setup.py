@@ -7,6 +7,8 @@
 ##
 
 import os
+import yaml
+import configparser
 import logging
 from io import StringIO
 from typing import List
@@ -47,9 +49,18 @@ class Edk2PlatformSetup(Edk2MultiPkgAwareInvocable):
 
     def AddCommandLineOptions(self, parserObj):
         ''' adds command line options to the argparser '''
+        def abs_file_path(path_arg: str):
+            abs_path = os.path.abspath(path_arg)
+            if not os.path.isfile(abs_path):
+                raise ValueError(f"path '{path_arg}' does not point to a file")
+            return abs_path
+
         parserObj.add_argument('--force', '--FORCE', '--Force', dest="force", action='store_true', default=False)
         parserObj.add_argument('--omnicache', '--OMNICACHE', '--Omnicache', dest='omnicache_path',
                                default=os.environ.get('OMNICACHE_PATH'))
+        parserObj.add_argument("--special", dest="special", type=abs_file_path,
+                               default=None,
+                               help="[optional] path to the special setup config file")
 
         super().AddCommandLineOptions(parserObj)
 
@@ -60,6 +71,7 @@ class Edk2PlatformSetup(Edk2MultiPkgAwareInvocable):
         if (self.omnicache_path is not None) and (not os.path.exists(self.omnicache_path)):
             logging.warning(f"Omnicache path set to invalid path: {args.omnicache_Path}")
             self.omnicache_path = None
+        self.special_file = args.special
 
         super().RetrieveCommandLineOptions(args)
 
@@ -126,6 +138,9 @@ class Edk2PlatformSetup(Edk2MultiPkgAwareInvocable):
 
         # Grab the remaining Git repos.
         if required_submodules and len(required_submodules) > 0:
+            # If a "special" file is provided, pivot to the special init path.
+            if self.special_file is not None:
+                return self.SpecialSetup(self.special_file, required_submodules)
 
             # Git Repos: STEP 1 --------------------------------------
             # Make sure that the repos are all synced.
@@ -190,6 +205,86 @@ class Edk2PlatformSetup(Edk2MultiPkgAwareInvocable):
                     logging.error("FAILED!\n")
                     logging.error("Failed to fetch required repository!\n")
                     logging.error(str(e))
+
+        return 0
+
+
+    def SpecialSetup(self, special_config_path: str, required_submodules: List[RequiredSubmodule]) -> int:
+        edk2_logging.log_progress(f"## Performing a special setup using file: {special_config_path}")
+        with open(special_config_path, 'r') as yml_file:
+            special_config = yaml.load(yml_file, yaml.SafeLoader)
+
+        def get_repo_submodules(repo_path: str) -> List[dict]:
+            results = []
+            git_sm_config = configparser.ConfigParser()
+            git_sm_config.read(os.path.join(repo_path, ".gitmodules"))
+            for section in git_sm_config.sections():
+                results.append({
+                    'path': git_sm_config[section]['path'],
+                    'url': git_sm_config[section]['url']
+                })
+            return results
+
+        def get_url_substitution_from_list(url: str, sub_list: List[dict]):
+            # TODO: Maybe support wildcards or patterns.
+            # TODO: Maybe turn this into a dict object.
+            for sub in sub_list:
+                if url.lower() == sub['url'].lower():
+                    return sub['sub']
+            else:
+                return None
+
+        def special_init_submodule(root_path: str, submodule_info: dict, special_config: dict, recursive: bool = True):
+            repo_path = os.path.join(root_path, submodule_info['path'])
+            edk2_logging.log_progress(f"## Special init of repo '{repo_path}'")
+
+            # First, we need to check the path info against the sub list.
+            url_sub = get_url_substitution_from_list(submodule_info['url'], special_config['url_substitutions'])
+            if url_sub is not None:
+                # If found, first sub the url in the root_path.
+                params = ["submodule", "set-url", "--", submodule_info['path'], url_sub]
+                if RunCmd("git", " ".join(params), workingdir=root_path) != 0:
+                    logging.error(f"Failed to update url for {repo_path}")
+                    logging.error(f"-- From: {submodule_info['url']}")
+                    logging.error(f"-- To: {url_sub}")
+                    return False
+
+            # Then init the repo in the root path.
+            params = ["submodule", "update", "--init", "--", submodule_info['path']]
+            # TODO: Should we also use the Omnicache?
+            # TODO: Should we also process the skip directories (for dirty)?
+            if RunCmd("git", " ".join(params), workingdir=root_path) != 0:
+                logging.error(f"Failed to initialize repo {repo_path}")
+                return False
+
+            # If recursive, list submodules, update root_path, and repeat.
+            if recursive:
+                submodules = get_repo_submodules(repo_path=repo_path)
+                for sm in submodules:
+                    if not special_init_submodule(root_path=repo_path, submodule_info=sm,
+                                                  special_config=special_config, recursive=recursive):
+                        # If failed, propagate the failure.
+                        return False
+
+            return True
+
+        try:
+            # Get the repo submodules for the root.
+            root_path = self.GetWorkspaceRoot()
+            root_submodules = get_repo_submodules(repo_path=root_path)
+            for sm in root_submodules:
+                # Filter on required.
+                for req_sm in required_submodules:
+                    if sm['path'] == req_sm.path:
+                        # Special init in order, recursively if flagged.
+                        if not special_init_submodule(root_path=root_path, submodule_info=sm,
+                                                      special_config=special_config, recursive=req_sm.recursive):
+                            raise RuntimeError(f"failed to init '{os.path.join(root_path, sm['path'])}'")
+        except RuntimeError as e:
+            logging.error("FAILED!\n")
+            logging.error(str(e))
+
+        print(special_config)
 
         return 0
 
