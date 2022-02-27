@@ -232,6 +232,9 @@ class Edk2PlatformSetup(Edk2MultiPkgAwareInvocable):
             for sub in sub_list:
                 if url.lower() == sub['url'].lower():
                     return sub['sub']
+                # NOTE: Maybe support a wildcard for full Omnicache?
+                if sub['url'] == '*':
+                    return sub['sub']
             else:
                 return None
 
