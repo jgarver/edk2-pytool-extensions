@@ -220,6 +220,7 @@ class Edk2PlatformSetup(Edk2MultiPkgAwareInvocable):
             git_sm_config.read(os.path.join(repo_path, ".gitmodules"))
             for section in git_sm_config.sections():
                 results.append({
+                    'name': str(section).replace('submodule "', '').replace('"', ''),
                     'path': git_sm_config[section]['path'],
                     'url': git_sm_config[section]['url']
                 })
@@ -235,14 +236,14 @@ class Edk2PlatformSetup(Edk2MultiPkgAwareInvocable):
                 return None
 
         def special_init_submodule(root_path: str, submodule_info: dict, special_config: dict, recursive: bool = True):
-            repo_path = os.path.join(root_path, submodule_info['path'])
+            repo_path = os.path.normpath(os.path.join(root_path, submodule_info['path']))
             edk2_logging.log_progress(f"## Special init of repo '{repo_path}'")
 
             # First, we need to check the path info against the sub list.
             url_sub = get_url_substitution_from_list(submodule_info['url'], special_config['url_substitutions'])
             if url_sub is not None:
                 # If found, first sub the url in the root_path.
-                params = ["submodule", "set-url", "--", submodule_info['path'], url_sub]
+                params = ["submodule", "set-url", "--", submodule_info['name'], url_sub]
                 if RunCmd("git", " ".join(params), workingdir=root_path) != 0:
                     logging.error(f"Failed to update url for {repo_path}")
                     logging.error(f"-- From: {submodule_info['url']}")
@@ -283,8 +284,7 @@ class Edk2PlatformSetup(Edk2MultiPkgAwareInvocable):
         except RuntimeError as e:
             logging.error("FAILED!\n")
             logging.error(str(e))
-
-        print(special_config)
+            return -1
 
         return 0
 
